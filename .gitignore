@@ -1,0 +1,7 @@
+# Docker
+config.json
+data/
+
+# OS-specific
+.DS_Store
+Thumbs.db

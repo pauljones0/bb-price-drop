@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  price-monitor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: bestbuy-price-monitor
+    restart: unless-stopped
+    volumes:
+      - ./config.json:/app/config.json:ro
+      - price_monitor_data:/app/data
+    # environment: # You can add environment variables here if needed by the script
+      # - PYTHONUNBUFFERED=1 # Ensures print statements are sent directly to logs
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  price_monitor_data:
+    driver: local

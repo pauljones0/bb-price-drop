@@ -1,0 +1,18 @@
+.git
+.gitignore
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+env
+venv
+.env
+docs
+*.md
+!README.md 
+# Add any other files or directories that should not be included in the Docker image
+# For example, local development configurations or large data files not needed at runtime.
+config.json 
+# data/ # If you decide to mount data from host instead of using a volume, you might ignore it.
+# For now, assuming data persistence via Docker volume as requested.

@@ -1,0 +1,29 @@
+{
+  "discord_webhook_url": "YOUR_WEBHOOK_URL_HERE",
+  "discord": {
+    "webhook_username": "StockTrack Price Monitor",
+    "webhook_avatar_url": "YOUR_AVATAR_URL_HERE_OR_LEAVE_EMPTY",
+    "webhook_max_retries": 3,
+    "webhook_retry_delay_base_seconds": 5
+  },
+  "monitoring": {
+    "price_check_interval_seconds": 900,
+    "request_delay_seconds": 10,
+    "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.93 Safari/537.36",
+    "target_website_urls": {
+      "bestbuy_base_url": "https://www.bestbuy.ca",
+      "drops_url": "https://stocktrack.ca/bb/drops_data.php",
+      "history_url": "https://stocktrack.ca/bb/hist_data.php"
+    }
+  },
+  "logging": {
+    "log_level": "INFO",
+    "log_file_path": "data/app.log"
+  },
+  "data_persistence": {
+    "enabled": true,
+    "data_file_path": "data/price_history.json",
+    "max_history_days": 30,
+    "max_sku_entries": 1000
+  }
+}
