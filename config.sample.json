@@ -22,8 +22,8 @@
   },
   "data_persistence": {
     "enabled": true,
-    "data_file_path": "data/price_history.json",
-    "max_history_days": 30,
+    "sku_fetch_timestamps_file_path": "data/sku_fetch_timestamps.json",
+    "sku_fetch_cooldown_hours": 24,
     "max_sku_entries": 1000
   }
 }

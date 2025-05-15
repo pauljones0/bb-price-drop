@@ -11,9 +11,8 @@ from datetime import datetime, timedelta
 
 # --- Global Variables ---
 CONFIG = {}
-LAST_NOTIFIED_PRICES = {} # SKU: last_notified_price
-PRICE_HISTORY_FILE = "data/price_history.json" # Default, will be overridden by config
-MAX_HISTORY_DAYS = 30 # Default, will be overridden by config
+SKU_FETCH_TIMESTAMPS_FILE = "data/sku_fetch_timestamps.json" # Default, will be overridden by config
+SKU_FETCH_COOLDOWN_HOURS = 24 # Default, will be overridden by config
 MAX_SKU_ENTRIES = 1000 # Default, will be overridden by config
 
 # --- Logging Setup ---
@@ -39,19 +38,19 @@ def setup_logging():
 
 # --- Configuration Loading ---
 def load_config():
-    global CONFIG, PRICE_HISTORY_FILE, MAX_HISTORY_DAYS, MAX_SKU_ENTRIES
+    global CONFIG, SKU_FETCH_TIMESTAMPS_FILE, SKU_FETCH_COOLDOWN_HOURS, MAX_SKU_ENTRIES
     try:
         with open('config.json', 'r') as f:
             CONFIG = json.load(f)
         
         # Setup data persistence parameters
         persistence_config = CONFIG.get('data_persistence', {})
-        PRICE_HISTORY_FILE = persistence_config.get('data_file_path', PRICE_HISTORY_FILE)
-        MAX_HISTORY_DAYS = persistence_config.get('max_history_days', MAX_HISTORY_DAYS)
+        SKU_FETCH_TIMESTAMPS_FILE = persistence_config.get('sku_fetch_timestamps_file_path', SKU_FETCH_TIMESTAMPS_FILE)
+        SKU_FETCH_COOLDOWN_HOURS = persistence_config.get('sku_fetch_cooldown_hours', SKU_FETCH_COOLDOWN_HOURS)
         MAX_SKU_ENTRIES = persistence_config.get('max_sku_entries', MAX_SKU_ENTRIES)
 
-        # Ensure data directory exists for price history
-        os.makedirs(os.path.dirname(PRICE_HISTORY_FILE), exist_ok=True)
+        # Ensure data directory exists for SKU fetch timestamps
+        os.makedirs(os.path.dirname(SKU_FETCH_TIMESTAMPS_FILE), exist_ok=True)
 
         # Validate Discord webhook URL
         if not CONFIG.get('discord_webhook_url'):
@@ -66,95 +65,63 @@ def load_config():
         logging.error("CRITICAL: Error decoding config.json. Please check its format.")
         return False
 
-# --- Data Persistence ---
-def load_price_history():
-    global LAST_NOTIFIED_PRICES
+# --- SKU Fetch Timestamp Persistence ---
+def load_sku_fetch_timestamps():
+    """Loads the SKU fetch timestamps from the JSON file."""
     if not CONFIG.get('data_persistence', {}).get('enabled', False):
-        logging.info("Data persistence is disabled in config.")
+        logging.info("Data persistence for SKU fetch timestamps is disabled in config.")
         return {}
     try:
-        if os.path.exists(PRICE_HISTORY_FILE):
-            with open(PRICE_HISTORY_FILE, 'r') as f:
-                history = json.load(f)
-                # Convert string prices back to Decimal for LAST_NOTIFIED_PRICES
-                LAST_NOTIFIED_PRICES = {sku: Decimal(price_str) for sku, price_str in history.get('last_notified_prices', {}).items()}
-                return history.get('sku_price_points', {}) # This will store historical price points for each SKU
-        logging.info(f"No existing price history file found at {PRICE_HISTORY_FILE}. Starting fresh.")
+        if os.path.exists(SKU_FETCH_TIMESTAMPS_FILE):
+            with open(SKU_FETCH_TIMESTAMPS_FILE, 'r') as f:
+                timestamps = json.load(f)
+                # Basic validation: ensure it's a dict
+                if not isinstance(timestamps, dict):
+                    logging.warning(f"SKU fetch timestamps file ({SKU_FETCH_TIMESTAMPS_FILE}) is not a valid dictionary. Starting fresh.")
+                    return {}
+                return timestamps
+        logging.info(f"No existing SKU fetch timestamps file found at {SKU_FETCH_TIMESTAMPS_FILE}. Starting fresh.")
     except (json.JSONDecodeError, IOError) as e:
-        logging.error(f"Error loading price history from {PRICE_HISTORY_FILE}: {e}. Starting fresh.")
-    return {} # Return empty dict if file not found or error
+        logging.error(f"Error loading SKU fetch timestamps from {SKU_FETCH_TIMESTAMPS_FILE}: {e}. Starting fresh.")
+    return {}
 
-def save_price_history(sku_price_points):
+def save_sku_fetch_timestamps(sku_fetch_timestamps):
+    """Saves the SKU fetch timestamps to the JSON file."""
     if not CONFIG.get('data_persistence', {}).get('enabled', False):
         return
     try:
-        # Convert Decimal prices in LAST_NOTIFIED_PRICES to string for JSON serialization
-        serializable_last_notified = {sku: str(price) for sku, price in LAST_NOTIFIED_PRICES.items()}
-        with open(PRICE_HISTORY_FILE, 'w') as f:
-            json.dump({'sku_price_points': sku_price_points, 'last_notified_prices': serializable_last_notified}, f, indent=2)
-        logging.info(f"Price history saved to {PRICE_HISTORY_FILE}")
+        with open(SKU_FETCH_TIMESTAMPS_FILE, 'w') as f:
+            json.dump(sku_fetch_timestamps, f, indent=2)
+        logging.info(f"SKU fetch timestamps saved to {SKU_FETCH_TIMESTAMPS_FILE}")
     except IOError as e:
-        logging.error(f"Error saving price history to {PRICE_HISTORY_FILE}: {e}")
+        logging.error(f"Error saving SKU fetch timestamps to {SKU_FETCH_TIMESTAMPS_FILE}: {e}")
 
-def manage_price_history_size(sku_price_points):
+def manage_sku_fetch_timestamps(sku_fetch_timestamps):
     """
-    Manages the size of the price history data.
-    - Prunes old price points for each SKU.
-    - Limits the total number of SKUs tracked if it exceeds MAX_SKU_ENTRIES (less critical for now).
+    Manages the size of the SKU fetch timestamps data.
+    - Limits the total number of SKUs tracked if it exceeds MAX_SKU_ENTRIES by removing the oldest entries.
     """
     if not CONFIG.get('data_persistence', {}).get('enabled', False):
-        return sku_price_points
+        return sku_fetch_timestamps
 
-    cutoff_date = datetime.now() - timedelta(days=MAX_HISTORY_DAYS)
-    updated_sku_price_points = {}
-    pruned_count = 0
-
-    for sku, entries in sku_price_points.items():
-        # Filter entries: keep only those within the MAX_HISTORY_DAYS
-        # Assuming entries are like: {'timestamp': 'YYYY-MM-DDTHH:MM:SS', 'price': '123.45'}
-        valid_entries = []
-        for entry in entries:
-            try:
-                entry_date = datetime.fromisoformat(entry['timestamp'])
-                if entry_date >= cutoff_date:
-                    valid_entries.append(entry)
-            except (KeyError, ValueError):
-                logging.warning(f"Malformed entry for SKU {sku} in price history: {entry}. Skipping.")
-                valid_entries.append(entry) # Keep malformed entries for now to avoid data loss, or decide to discard
-
-        if valid_entries:
-            updated_sku_price_points[sku] = valid_entries
-        pruned_count += (len(entries) - len(valid_entries))
-
-    if pruned_count > 0:
-        logging.info(f"Pruned {pruned_count} old price entries from history.")
-    
-    # Optional: Limit total number of SKUs (e.g., by LRU or other metric if needed)
-    if len(updated_sku_price_points) > MAX_SKU_ENTRIES:
-        logging.warning(f"Number of SKUs ({len(updated_sku_price_points)}) exceeds MAX_SKU_ENTRIES ({MAX_SKU_ENTRIES}). Consider implementing SKU pruning.")
-        # For now, we'll just log. A more complex strategy might be needed if this becomes an issue.
-
-    return updated_sku_price_points
-
-def add_price_point(sku_price_points, sku, price):
-    """Adds a new price point for a SKU with a timestamp."""
-    if not CONFIG.get('data_persistence', {}).get('enabled', False):
-        return
-    
-    if sku not in sku_price_points:
-        sku_price_points[sku] = []
-    
-    # Avoid adding duplicate price if it's the same as the last recorded one for this run (not historical)
-    # This simple check might need refinement based on how often prices are polled vs. actual changes
-    if sku_price_points[sku] and safe_decimal(sku_price_points[sku][-1]['price']) == safe_decimal(price):
-        # logging.debug(f"Price for SKU {sku} ({price}) is same as last recorded. Not adding duplicate point for this check.")
-        return
-
-    sku_price_points[sku].append({
-        'timestamp': datetime.now().isoformat(),
-        'price': str(safe_decimal(price)) # Store as string
-    })
-
+    if len(sku_fetch_timestamps) > MAX_SKU_ENTRIES:
+        logging.info(f"Number of SKUs in fetch timestamp history ({len(sku_fetch_timestamps)}) exceeds MAX_SKU_ENTRIES ({MAX_SKU_ENTRIES}). Pruning oldest entries...")
+        # Sort SKUs by their timestamp (value in the dict), oldest first
+        # Items are (sku, timestamp_str)
+        sorted_skus = sorted(sku_fetch_timestamps.items(), key=lambda item: datetime.fromisoformat(item[1]))
+        
+        num_to_prune = len(sorted_skus) - MAX_SKU_ENTRIES
+        pruned_count = 0
+        for i in range(num_to_prune):
+            sku_to_remove = sorted_skus[i][0]
+            if sku_to_remove in sku_fetch_timestamps:
+                del sku_fetch_timestamps[sku_to_remove]
+                pruned_count += 1
+        
+        if pruned_count > 0:
+            logging.info(f"Pruned {pruned_count} oldest SKU fetch timestamp entries.")
+            
+    return sku_fetch_timestamps
 
 # --- Helper function for safe Decimal conversion ---
 def safe_decimal(value):
@@ -319,14 +286,25 @@ def get_all_items(total_count, monitoring_config):
         logging.error("Error decoding JSON from all item data request.")
         return None
 
-def process_item_history(item_data, monitoring_config, sku_price_points):
-    global LAST_NOTIFIED_PRICES
+def process_item_history(item_data, monitoring_config, sku_fetch_timestamps):
     sku = item_data.get('Sku')
     if not sku:
         logging.warning("Item data is missing Sku. Skipping.")
         return None
 
-    logging.info(f"Checking historical data for SKU: {sku}")
+    # Cooldown logic: Check if SKU history was fetched recently
+    if CONFIG.get('data_persistence', {}).get('enabled', False) and sku in sku_fetch_timestamps:
+        try:
+            last_fetch_time_str = sku_fetch_timestamps[sku]
+            last_fetch_time = datetime.fromisoformat(last_fetch_time_str)
+            cooldown_period = timedelta(hours=SKU_FETCH_COOLDOWN_HOURS)
+            if datetime.now() - last_fetch_time < cooldown_period:
+                logging.info(f"SKU {sku} history fetched within the last {SKU_FETCH_COOLDOWN_HOURS} hours. Skipping API call.")
+                return None # Skip fetching and processing this item
+        except ValueError:
+            logging.warning(f"Invalid timestamp format for SKU {sku} in fetch history: {last_fetch_time_str}. Will attempt to fetch.")
+
+    logging.info(f"Fetching historical data for SKU: {sku}")
     history_url = monitoring_config.get('target_website_urls', {}).get('history_url')
     headers = {"Host": "stocktrack.ca", "User-Agent": monitoring_config.get('user_agent')}
     if not history_url:
@@ -337,6 +315,11 @@ def process_item_history(item_data, monitoring_config, sku_price_points):
         history_response = requests.get(f"{history_url}?sku={sku}", headers=headers)
         history_response.raise_for_status()
         history_data_json = history_response.json()
+        # Update fetch timestamp after successful API call
+        if CONFIG.get('data_persistence', {}).get('enabled', False):
+            sku_fetch_timestamps[sku] = datetime.now().isoformat()
+            logging.debug(f"Updated fetch timestamp for SKU {sku}.")
+
     except requests.exceptions.RequestException as e:
         logging.error(f"Error fetching historical data for SKU {sku}: {e}")
         return None
@@ -345,77 +328,58 @@ def process_item_history(item_data, monitoring_config, sku_price_points):
         return None
 
     historical_prices_str = [entry.get('y') for entry in history_data_json.get('1P', []) if entry.get('y') is not None]
-    
     current_price_from_drops = safe_decimal(item_data.get('NewPrice'))
-    add_price_point(sku_price_points, sku, current_price_from_drops) # Add current price to our history
 
     if not historical_prices_str:
-        logging.info(f"No API historical price data found for SKU {sku}. Using stored history if available.")
-        return None 
+        logging.info(f"No API historical price data found for SKU {sku}.")
+        # Even if no API history, we might still want to notify if the current price itself is a deal based on some criteria
+        # For now, if no history, we can't determine ATL, highest etc.
+        # Depending on requirements, one might still process the item if current_price_from_drops is exceptionally low
+        # based on other rules, but the current logic relies on historical_prices.
+        return None
 
     historical_prices = [safe_decimal(price_str) for price_str in historical_prices_str]
-    
     current_price = current_price_from_drops
 
     if not historical_prices:
         logging.warning(f"Converted historical prices list is empty for SKU {sku}. Skipping notification check.")
         return None
 
-    lowest_historical_price = min(historical_prices)  # This is prior_atl_price
-    highest_historical_price = max(historical_prices) # This is highest_price_offered
+    lowest_historical_price = min(historical_prices)
+    highest_historical_price = max(historical_prices)
 
     should_notify = False
     notification_reason = ""
 
-    # New notification logic
+    # New notification logic (simplified as LAST_NOTIFIED_PRICES is removed)
     # Condition 1: current_price < 50% of highest_price_offered
     condition_base_50_percent = False
-    if highest_historical_price > Decimal('0'): # Avoid issues if highest price is zero
+    if highest_historical_price > Decimal('0'):
         condition_base_50_percent = (current_price < Decimal('0.5') * highest_historical_price)
     elif current_price < Decimal('0'): # If highest is 0, only negative current price meets <0.5*0
         condition_base_50_percent = True
 
-
     if condition_base_50_percent:
         current_stock_is_positive = item_data.get('InStock', False)
-
-        # Condition 2a: current_price matches prior_atl_price, (prior_atl_stock was zero - ASSUMED), and current_stock > 0
-        # Note: "prior_atl_stock associated with that prior_atl_price was zero" cannot be verified from current data.
-        # This condition effectively triggers if an item hits its ATL and is (back) in stock.
         sub_condition_2a = (current_price == lowest_historical_price and current_stock_is_positive)
-
-        # Condition 2b: current_price is at least 10% lower than prior_atl_price
         sub_condition_2b = False
-        if lowest_historical_price > Decimal('0'): # Avoid issues if ATL is zero
+        if lowest_historical_price > Decimal('0'):
             sub_condition_2b = (current_price <= lowest_historical_price * Decimal('0.9'))
-        elif current_price < Decimal('0'): # If ATL is 0, only negative current price is < 0.9*0
-             sub_condition_2b = (current_price < lowest_historical_price) # Effectively current_price < 0
+        elif current_price < Decimal('0'):
+             sub_condition_2b = (current_price < lowest_historical_price)
 
         if sub_condition_2a or sub_condition_2b:
-            if sku not in LAST_NOTIFIED_PRICES or current_price < LAST_NOTIFIED_PRICES[sku]:
-                should_notify = True
-                LAST_NOTIFIED_PRICES[sku] = current_price
-                if sub_condition_2a:
-                    notification_reason = f"Price at 50% below highest ({highest_historical_price}), matches ATL ({lowest_historical_price}), and now in stock."
-                    logging.info(f"SKU {sku} meets notification criteria (ATL restock, 50% rule): Current Price {current_price}. Reason: {notification_reason}.")
-                else:  # sub_condition_2b must be true
-                    notification_reason = f"Price at 50% below highest ({highest_historical_price}) AND >=10% below ATL ({lowest_historical_price})."
-                    logging.info(f"SKU {sku} meets notification criteria (Significant drop below ATL, 50% rule): Current Price {current_price}. Reason: {notification_reason}.")
-            elif current_price == LAST_NOTIFIED_PRICES[sku]:
-                logging.info(f"SKU {sku} meets new notification criteria at price {current_price}, but already notified at this price.")
-            # No 'else' needed here as (current_price < LAST_NOTIFIED_PRICES[sku]) is the main re-notification trigger.
+            should_notify = True # Notify if conditions met, cooldown already handled
+            if sub_condition_2a:
+                notification_reason = f"Price at 50% below highest ({highest_historical_price}), matches ATL ({lowest_historical_price}), and now in stock."
+                logging.info(f"SKU {sku} meets notification criteria (ATL restock, 50% rule): Current Price {current_price}. Reason: {notification_reason}.")
+            else:  # sub_condition_2b must be true
+                notification_reason = f"Price at 50% below highest ({highest_historical_price}) AND >=10% below ATL ({lowest_historical_price})."
+                logging.info(f"SKU {sku} meets notification criteria (Significant drop below ATL, 50% rule): Current Price {current_price}. Reason: {notification_reason}.")
         else:
             logging.info(f"SKU {sku}: Base 50% condition met, but neither specific sub-condition (2a or 2b) met. Current: {current_price}, ATL: {lowest_historical_price}, Highest: {highest_historical_price}, InStock: {current_stock_is_positive}")
     else:
         logging.info(f"SKU {sku} does not meet base 50% condition (current price {current_price} vs 50% of highest {highest_historical_price}).")
-
-    # Reset notification status if it no longer meets criteria
-    if not should_notify and sku in LAST_NOTIFIED_PRICES:
-        # This ensures that if an item was notified, but on a subsequent check it no longer meets *any*
-        # of the new notification criteria (not just that the price hasn't dropped further),
-        # its notification status is reset, allowing it to be notified again if it later re-qualifies.
-        del LAST_NOTIFIED_PRICES[sku]
-        logging.info(f"SKU {sku} no longer meets new notification criteria with current price {current_price}. Resetting its notification status.")
 
     if should_notify:
         result = item_data.copy()
@@ -457,16 +421,20 @@ def check_prices():
         logging.error("Monitoring configuration is missing.")
         return
 
-    sku_price_points = load_price_history() 
+    sku_fetch_timestamps = load_sku_fetch_timestamps()
 
     total_items = get_total_count(monitoring_config)
     if total_items is None:
         logging.error("Failed to get total items count. Skipping this run.")
+        # Attempt to save any modified timestamps even if the run is partial
+        save_sku_fetch_timestamps(sku_fetch_timestamps)
         return
 
     all_items_data = get_all_items(total_items, monitoring_config)
     if all_items_data is None:
         logging.error("Failed to get all items data. Skipping this run.")
+        # Attempt to save any modified timestamps even if the run is partial
+        save_sku_fetch_timestamps(sku_fetch_timestamps)
         return
 
     logging.info(f"Processing {len(all_items_data)} items...")
@@ -475,7 +443,8 @@ def check_prices():
     delay_seconds = monitoring_config.get('request_delay_seconds', 10)
 
     for i, item in enumerate(all_items_data):
-        processed_item = process_item_history(item, monitoring_config, sku_price_points)
+        # Pass sku_fetch_timestamps to process_item_history
+        processed_item = process_item_history(item, monitoring_config, sku_fetch_timestamps)
         if processed_item:
             all_time_low_items_to_notify.append(processed_item)
 
@@ -483,11 +452,12 @@ def check_prices():
             logging.debug(f"Waiting {delay_seconds} seconds before next item...")
             time.sleep(delay_seconds)
     
-    sku_price_points = manage_price_history_size(sku_price_points)
-    save_price_history(sku_price_points) 
+    # Manage and save SKU fetch timestamps
+    sku_fetch_timestamps = manage_sku_fetch_timestamps(sku_fetch_timestamps)
+    save_sku_fetch_timestamps(sku_fetch_timestamps)
 
     if all_time_low_items_to_notify:
-        logging.info(f"\n--- Found {len(all_time_low_items_to_notify)} items at new all-time lows to notify ---")
+        logging.info(f"\n--- Found {len(all_time_low_items_to_notify)} items meeting notification criteria ---")
         for item_detail in all_time_low_items_to_notify:
             send_discord_notification(item_detail) # Direct synchronous call
     else:
