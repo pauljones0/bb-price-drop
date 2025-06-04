@@ -1,5 +1,5 @@
 # Stage 1: Builder stage for installing dependencies
-FROM python:3.9-slim-buster AS builder
+FROM python:3.13-slim-bookworm AS builder
 
 WORKDIR /app
 
@@ -17,7 +17,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Stage 2: Final stage
-FROM python:3.9-slim-buster AS final
+FROM python:3.13-slim-bookworm AS final
 
 WORKDIR /app
 
